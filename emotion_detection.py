@@ -116,6 +116,7 @@ def main():
 
     print("Camera on. Press Q to quit.")
     pred_history = deque(maxlen=8)  # stabilize predictions across frames
+    PAD_RATIO = 0.08  # less background than before; helps webcam crops
 
     while True:
         ret, frame = cap.read()
@@ -131,7 +132,9 @@ def main():
             # Use the largest face only (reduces jumping between faces)
             (x, y, w, h) = max(faces, key=lambda f: f[2] * f[3])
             if model is not None:
-                face_roi = pad_square_crop(gray, x, y, w, h, pad_ratio=0.25)
+                face_roi = pad_square_crop(gray, x, y, w, h, pad_ratio=PAD_RATIO)
+                # Improve robustness to lighting changes
+                face_roi = cv2.equalizeHist(face_roi)
                 inp = preprocess_face(face_roi)
 
                 if kind == "torch":
