@@ -63,13 +63,25 @@ From the project root (with venv activated):
 python train_model.py
 ```
 
+**Default (more precise):** uses the **full** train/test folders, **data augmentation**, **class weights**, **label smoothing**, up to **40 epochs** with **early stopping**. Expect a longer run on CPU.
+
+**Quick test (small subset, ~10 epochs):**
+
+```bash
+python train_model.py --quick
+```
+
+**Fine-tune an existing `models/emotion_cnn.pt`:**
+
+```bash
+python train_model.py --finetune
+```
+
 This will:
 
 - Load images from `dataset/archive/train` and `dataset/archive/test` (or `dataset/fer2013.csv` if no archive)
 - Train a small CNN with **PyTorch** and save **`models/emotion_cnn.pt`**
 - Save training curves to `models/training_curves.png`
-
-Training may take a while depending on your Mac. You can reduce `epochs` in `train_model.py` for a quicker run.
 
 ## 4. Run webcam emotion detection
 
