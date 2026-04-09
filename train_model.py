@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchvision import datasets, transforms
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ EARLY_STOP_PATIENCE = 8
 FINETUNE_EPOCHS = 25
 FINETUNE_LR = 3e-4
 BASE_LR = 1e-3
-LABEL_SMOOTHING = 0.08
+LABEL_SMOOTHING = 0.05
 
 
 def _pick_device():
@@ -140,14 +140,19 @@ def balanced_subset(ds, max_total, num_classes):
     return Subset(ds, selected)
 
 
-def class_weights_from_folder(train_dir):
-    """Inverse-frequency weights (helps rare classes like disgust)."""
+def class_weights_from_folder(train_dir, sqrt_smooth: bool = True):
+    """Class weights for CrossEntropyLoss.
+
+    With sqrt_smooth=True, uses sqrt(inverse frequency) so rare classes (e.g. disgust) are
+    not overpowered vs common ones (neutral, happy) — better balance for webcam inference.
+    """
     tmp = datasets.ImageFolder(train_dir, transform=get_val_transforms())
     counts = torch.bincount(
         torch.tensor(tmp.targets, dtype=torch.long), minlength=NUM_CLASSES
     ).float()
     counts = counts.clamp(min=1.0)
-    w = counts.sum() / (NUM_CLASSES * counts)
+    inv = counts.sum() / (NUM_CLASSES * counts)
+    w = torch.sqrt(inv) if sqrt_smooth else inv
     w = w / w.mean()
     return w.to(DEVICE)
 
@@ -164,9 +169,26 @@ def build_archive_loaders(quick: bool):
     else:
         train_ds, test_ds = train_full, test_full
 
-    train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0
-    )
+    if quick:
+        train_loader = DataLoader(
+            train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0
+        )
+    else:
+        # Balanced sampling each epoch: every class contributes equally in expectation
+        # (reduces one emotion dominating after inverse-frequency loss weighting alone).
+        targets_np = np.array(train_full.targets, dtype=np.int64)
+        class_counts = np.bincount(targets_np, minlength=NUM_CLASSES).astype(np.float64)
+        class_counts = np.maximum(class_counts, 1.0)
+        per_sample_w = 1.0 / class_counts[targets_np]
+        sample_weights = torch.from_numpy(per_sample_w.astype(np.float64))
+        sampler = WeightedRandomSampler(
+            sample_weights,
+            num_samples=len(train_ds),
+            replacement=True,
+        )
+        train_loader = DataLoader(
+            train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=0
+        )
     test_loader = DataLoader(
         test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0
     )
@@ -254,12 +276,15 @@ def train_loop(
     use_label_smoothing,
     early_stop_patience,
     class_weight_override=None,
+    class_weights_sqrt_smooth: bool = False,
 ):
     if class_weight_override is not None:
         cw = class_weight_override.to(DEVICE)
         print("Class weights (from labels):", cw.cpu().numpy().round(3))
     elif use_class_weights and os.path.isdir(TRAIN_DIR):
-        cw = class_weights_from_folder(TRAIN_DIR)
+        cw = class_weights_from_folder(
+            TRAIN_DIR, sqrt_smooth=class_weights_sqrt_smooth
+        )
         print("Class weights:", cw.cpu().numpy().round(3))
     else:
         cw = None
@@ -346,7 +371,8 @@ def main():
             )
         else:
             print(
-                f"Mode: PRECISION — full train/test, augmentation, class weights, "
+                f"Mode: PRECISION — full train/test, augmentation, balanced batches "
+                f"(WeightedRandomSampler) + sqrt class weights, "
                 f"up to {FULL_EPOCHS} epochs, early stop patience {EARLY_STOP_PATIENCE}"
             )
         if args.finetune:
@@ -389,6 +415,7 @@ def main():
                 use_class_weights=True,
                 use_label_smoothing=True,
                 early_stop_patience=6,
+                class_weights_sqrt_smooth=True,
             )
         else:
             history = train_loop(
@@ -401,6 +428,7 @@ def main():
                 use_class_weights=True,
                 use_label_smoothing=True,
                 early_stop_patience=EARLY_STOP_PATIENCE,
+                class_weights_sqrt_smooth=True,
             )
 
     else:

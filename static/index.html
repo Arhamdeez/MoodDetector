@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Emotion Robot</title>
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --panel: #121820;
+      --line: #2d3848;
+      --text: #e6edf3;
+      --muted: #8b9cb3;
+      --accent: #3dff9a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(ellipse 120% 80% at 50% 0%, #152028 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "SF Mono", "Menlo", "Consolas", monospace;
+      font-size: 14px;
+      overflow-x: hidden;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 1.25rem;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.25rem;
+      min-height: 100vh;
+      align-items: start;
+    }
+    @media (max-width: 800px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    header {
+      grid-column: 1 / -1;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.8rem; }
+
+    .robot-stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 460px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+    .robot-stage::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 50% 40%, rgba(61, 255, 154, 0.06) 0%, transparent 50%);
+      pointer-events: none;
+    }
+    /* Floor line — robot “distance” reads against this */
+    .robot-stage::after {
+      content: "";
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      bottom: 18%;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--line), transparent);
+      opacity: 0.6;
+      pointer-events: none;
+    }
+
+    .status-pill {
+      position: absolute;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 0.35rem 0.85rem;
+      background: rgba(0,0,0,0.45);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 0.75rem;
+      z-index: 4;
+    }
+    .status-pill strong { color: var(--accent); }
+
+    /* Cheer-up layer when user looks sad */
+    .cheer-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding-top: 52px;
+      opacity: 0;
+      transition: opacity 0.45s ease;
+    }
+    [data-emotion="sad"] .cheer-overlay {
+      opacity: 1;
+    }
+    .cheer-msg {
+      margin: 0;
+      font-size: 0.72rem;
+      color: #ffb8d9;
+      text-align: center;
+      max-width: 220px;
+      line-height: 1.35;
+      text-shadow: 0 0 12px rgba(255, 100, 160, 0.5);
+      animation: cheerPulse 1.8s ease-in-out infinite;
+    }
+    .hearts {
+      position: relative;
+      width: 200px;
+      height: 100px;
+      margin-top: 0.25rem;
+    }
+    .hearts span {
+      position: absolute;
+      font-size: 1.35rem;
+      opacity: 0.9;
+      animation: floatHeart 2.4s ease-in-out infinite;
+    }
+    .hearts span:nth-child(1) { left: 10%; top: 20%; animation-delay: 0s; }
+    .hearts span:nth-child(2) { left: 45%; top: 0; animation-delay: 0.4s; }
+    .hearts span:nth-child(3) { left: 78%; top: 35%; animation-delay: 0.8s; }
+    .hearts span:nth-child(4) { left: 28%; top: 55%; animation-delay: 1.1s; font-size: 1rem; }
+    @keyframes floatHeart {
+      0%, 100% { transform: translateY(0) scale(1); opacity: 0.85; }
+      50% { transform: translateY(-14px) scale(1.15); opacity: 1; }
+    }
+    @keyframes cheerPulse {
+      0%, 100% { opacity: 0.85; }
+      50% { opacity: 1; }
+    }
+
+    /* Whole robot rig: approach / retreat / dance */
+    .bot-root {
+      position: relative;
+      z-index: 2;
+      transform-origin: center 85%;
+      transition: filter 0.4s ease;
+    }
+    .bot-svg {
+      width: min(320px, 85vw);
+      height: auto;
+      display: block;
+      filter: drop-shadow(0 8px 24px rgba(0,0,0,0.4));
+    }
+    .bot-head { fill: #3a4556; stroke: #5a6a82; stroke-width: 2; }
+    .bot-body { fill: #2d3848; stroke: #4a5a6e; stroke-width: 2; }
+    .bot-arm { fill: #3a4556; stroke: #5a6a82; stroke-width: 1.5; }
+    .bot-eye-outer { fill: #1a222c; stroke: #5a6a82; stroke-width: 1.5; }
+    .bot-eye-inner { fill: #3dff9a; transition: transform 0.25s ease, fill 0.3s ease; }
+    .bot-mouth {
+      fill: none;
+      stroke: #8b9cb3;
+      stroke-width: 3;
+      stroke-linecap: round;
+      transition: d 0.35s ease, stroke 0.3s ease;
+    }
+    .bot-antenna-ball {
+      fill: #3dff9a;
+      filter: drop-shadow(0 0 8px rgba(61,255,154,0.8));
+      transition: fill 0.3s ease, filter 0.3s ease;
+    }
+    .bot-cheek { fill: rgba(255,100,120,0.25); opacity: 0; transition: opacity 0.3s ease; }
+
+    .arm-l-pivot, .arm-r-pivot {
+      transform-box: fill-box;
+      transform-origin: 0px 0px;
+    }
+
+    /* —— Happy: comes closer (larger, higher on “stage”) —— */
+    [data-emotion="happy"] .bot-root {
+      animation: happyApproach 0.85s ease-in-out infinite;
+    }
+    [data-emotion="happy"] .arm-l-pivot {
+      animation: waveArmL 0.5s ease-in-out infinite alternate;
+    }
+    [data-emotion="happy"] .arm-r-pivot {
+      animation: waveArmR 0.5s ease-in-out infinite alternate;
+    }
+    [data-emotion="happy"] .bot-mouth { stroke: #3dff9a; }
+    [data-emotion="happy"] .bot-eye-inner { fill: #ffdd44; }
+    [data-emotion="happy"] .bot-cheek { opacity: 1; }
+    @keyframes happyApproach {
+      0%, 100% { transform: translateY(-28px) scale(1.14); }
+      50% { transform: translateY(-38px) scale(1.2); }
+    }
+
+    /* —— Sad: backs away + cheer overlay —— */
+    [data-emotion="sad"] .bot-root {
+      animation: sadRetreat 3s ease-in-out infinite;
+    }
+    [data-emotion="sad"] .bot-mouth { stroke: #6b8cce; }
+    [data-emotion="sad"] .bot-eye-inner { fill: #6b8cce; }
+    [data-emotion="sad"] .bot-antenna-ball {
+      fill: #6b8cce;
+      filter: drop-shadow(0 0 6px rgba(107,140,206,0.6));
+    }
+    @keyframes sadRetreat {
+      0%, 100% { transform: translateY(36px) scale(0.78) rotate(-5deg); }
+      50% { transform: translateY(40px) scale(0.76) rotate(-6deg); }
+    }
+
+    /* —— Neutral: dance —— */
+    [data-emotion="neutral"] .bot-root {
+      animation: neutralDance 1.1s ease-in-out infinite;
+    }
+    [data-emotion="neutral"] .arm-l-pivot {
+      animation: danceArmL 0.55s ease-in-out infinite;
+    }
+    [data-emotion="neutral"] .arm-r-pivot {
+      animation: danceArmR 0.55s ease-in-out infinite;
+    }
+    [data-emotion="neutral"] .bot-antenna-ball {
+      fill: #8b9cb3;
+      filter: drop-shadow(0 0 4px rgba(139,156,179,0.5));
+      animation: antennaBop 0.55s ease-in-out infinite;
+    }
+    @keyframes neutralDance {
+      0%, 100% { transform: translateX(0) translateY(-4px) rotate(0deg) scale(1); }
+      25% { transform: translateX(-14px) translateY(-8px) rotate(-6deg) scale(1.03); }
+      50% { transform: translateX(0) translateY(-2px) rotate(0deg) scale(1.02); }
+      75% { transform: translateX(14px) translateY(-8px) rotate(6deg) scale(1.03); }
+    }
+    @keyframes danceArmL {
+      0%, 100% { transform: rotate(8deg); }
+      50% { transform: rotate(-35deg); }
+    }
+    @keyframes danceArmR {
+      0%, 100% { transform: rotate(-8deg); }
+      50% { transform: rotate(35deg); }
+    }
+    @keyframes waveArmL {
+      from { transform: rotate(5deg); }
+      to { transform: rotate(40deg); }
+    }
+    @keyframes waveArmR {
+      from { transform: rotate(-5deg); }
+      to { transform: rotate(-40deg); }
+    }
+    @keyframes antennaBop {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-3px); }
+    }
+
+    /* —— Angry: keep distance + tense —— */
+    [data-emotion="angry"] .bot-root {
+      animation: angryCautious 0.28s ease-in-out infinite;
+    }
+    [data-emotion="angry"] .bot-mouth { stroke: #ff4466; }
+    [data-emotion="angry"] .bot-eye-inner { fill: #ff4466; }
+    [data-emotion="angry"] .bot-antenna-ball {
+      fill: #ff4466;
+      filter: drop-shadow(0 0 10px rgba(255,68,102,0.9));
+    }
+    @keyframes angryCautious {
+      0%, 100% { transform: translateY(16px) scale(0.9) translateX(0); }
+      50% { transform: translateY(16px) scale(0.9) translateX(5px); }
+    }
+
+    /* —— Surprise: hop forward —— */
+    [data-emotion="surprise"] .bot-root {
+      animation: surpriseHop 0.65s ease-in-out infinite;
+    }
+    [data-emotion="surprise"] .bot-mouth { stroke: #ffdd44; }
+    [data-emotion="surprise"] .bot-eye-inner { fill: #ffdd44; }
+    [data-emotion="surprise"] .bot-antenna-ball {
+      fill: #ffdd44;
+      animation: pulse 0.5s ease-in-out infinite;
+    }
+    @keyframes surpriseHop {
+      0%, 100% { transform: translateY(-14px) scale(1.08); }
+      40% { transform: translateY(-28px) scale(1.12); }
+    }
+
+    /* —— Fear: shrink back —— */
+    [data-emotion="fear"] .bot-root {
+      animation: fearHide 0.2s linear infinite;
+    }
+    [data-emotion="fear"] .bot-eye-inner { fill: #a78bfa; }
+    [data-emotion="fear"] .bot-antenna-ball { fill: #a78bfa; }
+    @keyframes fearHide {
+      0%, 100% { transform: translateY(26px) scale(0.74) translateX(0); }
+      33% { transform: translateY(28px) scale(0.72) translateX(-2px); }
+      66% { transform: translateY(26px) scale(0.74) translateX(2px); }
+    }
+
+    /* —— Disgust: lean back —— */
+    [data-emotion="disgust"] .bot-root {
+      animation: disgustLean 2s ease-in-out infinite;
+    }
+    [data-emotion="disgust"] .bot-mouth { stroke: #86c06a; }
+    [data-emotion="disgust"] .bot-eye-inner { fill: #86c06a; }
+    @keyframes disgustLean {
+      0%, 100% { transform: translate(12px, 18px) scale(0.88) skewX(-4deg); }
+      50% { transform: translate(14px, 22px) scale(0.86) skewX(-5deg); }
+    }
+
+    [data-emotion="unknown"] .bot-root {
+      transform: translateY(4px) scale(0.95);
+    }
+    [data-emotion="unknown"] .bot-antenna-ball { fill: #555; filter: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.82; }
+    }
+
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .cam-wrap {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .cam-wrap h2 {
+      margin: 0;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    video, canvas { display: block; width: 100%; height: auto; }
+    video.cam {
+      transform: scaleX(-1);
+      max-height: 200px;
+      object-fit: cover;
+      background: #000;
+    }
+    .readout {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0.75rem;
+      font-size: 0.75rem;
+    }
+    .readout .row { display: flex; justify-content: space-between; margin: 0.25rem 0; }
+    .readout .label { color: var(--muted); }
+    .hint {
+      color: var(--muted);
+      font-size: 0.7rem;
+      line-height: 1.4;
+    }
+    button.start {
+      width: 100%;
+      padding: 0.65rem;
+      background: linear-gradient(180deg, #2a5c42 0%, #1e4030 100%);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.8rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    button.start:hover { filter: brightness(1.08); }
+    button.start:disabled { opacity: 0.5; cursor: not-allowed; }
+    .err { color: #ff6b6b; font-size: 0.75rem; margin-top: 0.35rem; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <h1>Emotion sync robot</h1>
+      <p>Happy → it leans in. Sad → it backs up &amp; tries to cheer you up. Neutral → little dance.</p>
+    </header>
+
+    <div class="robot-stage" id="stage" data-emotion="neutral">
+      <div class="status-pill" id="pill">Reading: <strong id="pillEmotion">—</strong> <span id="pillConf"></span></div>
+
+      <div class="cheer-overlay" aria-hidden="true">
+        <p class="cheer-msg">Hey — I'm here. Deep breath. Want to try a tiny smile? You've got this.</p>
+        <div class="hearts">
+          <span>❤</span><span>✨</span><span>❤</span><span>🌟</span>
+        </div>
+      </div>
+
+      <div class="bot-root" id="botRoot">
+        <svg class="bot-svg" viewBox="0 0 200 260" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <line x1="100" y1="28" x2="100" y2="8" stroke="#5a6a82" stroke-width="3" />
+          <circle class="bot-antenna-ball" cx="100" cy="6" r="8" />
+          <rect class="bot-body" x="55" y="130" width="90" height="95" rx="16" />
+          <!-- arms (behind head draw order: before head) -->
+          <g transform="translate(58,138)">
+            <g class="arm-l-pivot">
+              <rect class="bot-arm" x="-36" y="-6" width="36" height="12" rx="6" />
+            </g>
+          </g>
+          <g transform="translate(142,138)">
+            <g class="arm-r-pivot">
+              <rect class="bot-arm" x="0" y="-6" width="36" height="12" rx="6" />
+            </g>
+          </g>
+          <rect class="bot-head" x="35" y="40" width="130" height="110" rx="36" />
+          <ellipse class="bot-cheek" cx="58" cy="95" rx="14" ry="10" />
+          <ellipse class="bot-cheek" cx="142" cy="95" rx="14" ry="10" />
+          <ellipse class="bot-eye-outer" cx="72" cy="82" rx="22" ry="24" />
+          <ellipse class="bot-eye-outer" cx="128" cy="82" rx="22" ry="24" />
+          <ellipse class="bot-eye-inner" cx="72" cy="82" rx="10" ry="12" />
+          <ellipse class="bot-eye-inner" cx="128" cy="82" rx="10" ry="12" />
+          <path id="mouth" class="bot-mouth" d="M 70 118 Q 100 128 130 118" />
+        </svg>
+      </div>
+    </div>
+
+    <div class="side">
+      <button type="button" class="start" id="btn">Start camera</button>
+      <p class="hint" id="hint">Click start, then allow the browser to use your webcam.</p>
+      <div class="cam-wrap">
+        <h2>You (camera)</h2>
+        <video id="video" class="cam" playsinline muted autoplay></video>
+      </div>
+      <div class="readout" id="readout">
+        <div class="row"><span class="label">Face</span><span id="rFace">—</span></div>
+        <div class="row"><span class="label">Emotion</span><span id="rEmotion">—</span></div>
+        <div class="row"><span class="label">Confidence</span><span id="rConf">—</span></div>
+      </div>
+      <p class="err" id="err" hidden></p>
+    </div>
+  </div>
+
+  <canvas id="cap" hidden></canvas>
+
+  <script>
+    const EMOTION_PATHS = {
+      happy: "M 72 118 Q 100 138 128 118",
+      sad: "M 72 124 Q 100 108 128 124",
+      angry: "M 75 120 L 125 120",
+      surprise: "M 100 109 m -7 0 a 7 7 0 1 0 14 0 a 7 7 0 1 0 -14 0",
+      fear: "M 78 118 Q 100 125 122 118",
+      disgust: "M 72 120 Q 100 115 128 122",
+      neutral: "M 70 118 Q 100 128 130 118",
+      unknown: "M 75 118 L 125 118",
+    };
+
+    const video = document.getElementById("video");
+    const cap = document.getElementById("cap");
+    const ctx = cap.getContext("2d");
+    const stage = document.getElementById("stage");
+    const mouth = document.getElementById("mouth");
+    const btn = document.getElementById("btn");
+    const errEl = document.getElementById("err");
+    let stream = null;
+    let timer = null;
+
+    function setErr(msg) {
+      errEl.hidden = !msg;
+      errEl.textContent = msg || "";
+    }
+
+    function normEmotion(e) {
+      if (!e) return "unknown";
+      return String(e).toLowerCase();
+    }
+
+    function applyRobot(emotion) {
+      const key = normEmotion(emotion);
+      stage.dataset.emotion = key in EMOTION_PATHS ? key : "unknown";
+      mouth.setAttribute("d", EMOTION_PATHS[key] || EMOTION_PATHS.unknown);
+    }
+
+    async function tick() {
+      if (!stream || video.readyState < 2) return;
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (!w || !h) return;
+      cap.width = w;
+      cap.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+      const blob = await new Promise((res) => cap.toBlob(res, "image/jpeg", 0.72));
+      if (!blob) return;
+      const fd = new FormData();
+      fd.append("image", blob, "frame.jpg");
+      try {
+        const r = await fetch("/api/predict", { method: "POST", body: fd });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || r.statusText);
+        setErr("");
+        const face = j.face_detected ? "yes" : "no";
+        document.getElementById("rFace").textContent = face;
+        if (j.face_detected && j.emotion) {
+          document.getElementById("rEmotion").textContent = j.emotion;
+          document.getElementById("rConf").textContent = (j.confidence * 100).toFixed(1) + "%";
+          document.getElementById("pillEmotion").textContent = j.emotion;
+          document.getElementById("pillConf").textContent =
+            "(" + (j.confidence * 100).toFixed(0) + "%)";
+          applyRobot(j.emotion);
+        } else {
+          document.getElementById("rEmotion").textContent = j.has_model ? "—" : "no model";
+          document.getElementById("rConf").textContent = "—";
+          document.getElementById("pillEmotion").textContent = j.face_detected ? "scanning…" : "no face";
+          document.getElementById("pillConf").textContent = "";
+          applyRobot("neutral");
+        }
+      } catch (e) {
+        setErr("Server: " + (e.message || String(e)) + " — is robot_web.py running?");
+      }
+    }
+
+    btn.addEventListener("click", async () => {
+      setErr("");
+      if (stream) {
+        clearInterval(timer);
+        timer = null;
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+        video.srcObject = null;
+        btn.textContent = "Start camera";
+        applyRobot("neutral");
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        btn.textContent = "Stop camera";
+        document.getElementById("hint").textContent = "Sending ~5 frames/s to the local server.";
+        timer = setInterval(tick, 200);
+      } catch (e) {
+        setErr("Camera blocked or unavailable: " + (e.message || e.name));
+      }
+    });
+  </script>
+</body>
+</html>
