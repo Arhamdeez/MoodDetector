@@ -2,8 +2,13 @@
 Real-time emotion detection from webcam using a CNN trained on your FER2013 images (PyTorch).
 Run: python emotion_detection.py
       python emotion_detection.py --camera 1   # if default device fails (common on macOS)
-      python emotion_detection.py --temperature 1.5   # if one label (e.g. Disgust) sticks incorrectly
-      python emotion_detection.py --sad-bias 0          # disable Sad logit boost
+      python emotion_detection.py --temperature 1.2   # sharper (default 1.1 spreads Angry/Fear a bit)
+      python emotion_detection.py --smooth-frames 5   # average labels over last N frames (default 5)
+      python emotion_detection.py --expressive-bias 0  # disable Angry/Fear runner-up nudge (default 0.07)
+      python emotion_detection.py --sad-bias 0.1      # optional Sad boost when Sad is close #2 (default 0)
+      python emotion_detection.py --cpu                 # force CPU (if MPS/CUDA is slower or buggy)
+CNN + softmax only (lip/mouth heuristics removed — they caused false Sad on neutral/smile).
+Uses CUDA > Apple MPS > CPU when available.
 Press Q to quit. Works without a model (face boxes only).
 """
 import argparse
@@ -32,6 +37,17 @@ FOLDER_TO_EMOTION = {
 IMG_SIZE = 48
 
 
+def pick_inference_device(*, force_cpu: bool = False) -> torch.device:
+    """CUDA (NVIDIA) > Apple MPS > CPU. Use --cpu if MPS is unstable or slower for tiny batches."""
+    if force_cpu:
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def _class_index_for_emotion(idx_to_emotion: dict, emotion_name: str):
     """Map display emotion name back to model class index (e.g. Sad -> 5 for folder-trained)."""
     for idx, name in idx_to_emotion.items():
@@ -46,18 +62,23 @@ def _should_apply_sad_bias_torch(
     happy_idx: int | None,
     neutral_idx: int | None,
 ) -> bool:
-    """Only nudge Sad when the model already ranks it plausible.
+    """Only nudge Sad when it is a close runner-up (not weak #2, not already #1).
 
-    Skips closed-mouth / subtle smiles: those usually have Happy competing with Neutral,
-    while Sad is not in the top two raw scores.
+    Boosting when Sad was only weakly in the top-2 made "Sad" stick too often.
     """
     L = logits_1d.flatten()
     order = torch.argsort(L, descending=True)
-    top2 = set(order[:2].tolist())
-    if sad_idx not in top2:
+    i0, i1 = int(order[0]), int(order[1])
+    if sad_idx == i0:
+        return False
+    if sad_idx != i1:
+        return False
+    gap = float(L[i0] - L[sad_idx])
+    if gap > 0.42:
         return False
     if happy_idx is not None and float(L[happy_idx]) >= float(L[sad_idx]):
         return False
+    top2 = {i0, i1}
     if (
         happy_idx is not None
         and neutral_idx is not None
@@ -74,15 +95,18 @@ def _should_apply_sad_bias_probs(
     happy_idx: int | None,
     neutral_idx: int | None,
 ) -> bool:
-    """Same gating as torch path, using normalized class probabilities (Keras path)."""
+    """Same gating as torch path (Keras): Sad must be clear #2, close to #1."""
     p = np.asarray(p, dtype=np.float64).ravel()
     p = p / max(float(p.sum()), 1e-12)
     order = np.argsort(-p)
-    top2 = set(order[:2].tolist())
-    if sad_idx not in top2:
+    i0, i1 = int(order[0]), int(order[1])
+    if sad_idx == i0 or sad_idx != i1:
+        return False
+    if float(p[i0] - p[sad_idx]) > 0.08:
         return False
     if happy_idx is not None and p[happy_idx] >= p[sad_idx]:
         return False
+    top2 = {i0, i1}
     if (
         happy_idx is not None
         and neutral_idx is not None
@@ -91,6 +115,61 @@ def _should_apply_sad_bias_probs(
     ):
         return False
     return True
+
+
+def apply_expressive_bias_torch(
+    logits_1d: torch.Tensor,
+    angry_idx: int | None,
+    fear_idx: int | None,
+    happy_idx: int | None,
+    bias: float,
+) -> torch.Tensor:
+    """Nudge Angry or Fear when they are a close #2 (helps under-reported tense faces)."""
+    if bias <= 0.0:
+        return logits_1d
+    flat = logits_1d.flatten()
+    order = torch.argsort(flat, descending=True)
+    i0, i1 = int(order[0]), int(order[1])
+    if float(flat[i0] - flat[i1]) > 0.48:
+        return logits_1d
+    for idx in (angry_idx, fear_idx):
+        if idx is None or idx != i1:
+            continue
+        if happy_idx is not None and i0 == happy_idx:
+            if float(flat[happy_idx] - flat[idx]) < 0.2:
+                continue
+        out = flat.clone()
+        out[idx] = out[idx] + bias
+        return out.view_as(logits_1d)
+    return logits_1d
+
+
+def apply_expressive_bias_logp_np(
+    logp: np.ndarray,
+    raw_probs: np.ndarray,
+    angry_idx: int | None,
+    fear_idx: int | None,
+    happy_idx: int | None,
+    bias: float,
+) -> np.ndarray:
+    """Same idea as apply_expressive_bias_torch for Keras probability outputs."""
+    if bias <= 0.0:
+        return logp
+    p = np.asarray(raw_probs, dtype=np.float64).ravel()
+    p = p / max(float(p.sum()), 1e-12)
+    order = np.argsort(-p)
+    i0, i1 = int(order[0]), int(order[1])
+    if float(p[i0] - p[i1]) > 0.09:
+        return logp
+    out = np.asarray(logp, dtype=np.float64).copy()
+    for idx in (angry_idx, fear_idx):
+        if idx is None or idx != i1:
+            continue
+        if happy_idx is not None and i0 == happy_idx and float(p[happy_idx] - p[idx]) < 0.06:
+            continue
+        out[idx] = out[idx] + bias
+        break
+    return out
 
 
 def _build_torch_model(state_dict):
@@ -102,11 +181,15 @@ def _build_torch_model(state_dict):
     return m
 
 
-def load_emotion_model():
+def load_emotion_model(device: torch.device | None = None):
     """Load PyTorch checkpoint first, then legacy Keras if present.
 
     Returns: (kind, model, idx_to_emotion)
+    PyTorch model is moved to ``device`` (default: pick_inference_device()).
     """
+    if device is None:
+        device = pick_inference_device(force_cpu=False)
+
     if os.path.isfile(MODEL_PATH_PT):
         try:
             ckpt = torch.load(
@@ -115,6 +198,8 @@ def load_emotion_model():
         except TypeError:
             ckpt = torch.load(MODEL_PATH_PT, map_location="cpu")
         model = _build_torch_model(ckpt["state_dict"])
+        model = model.to(device)
+        model.eval()
         class_to_idx = ckpt.get("class_to_idx", {}) or {}
         idx_to_emotion = {}
         for folder_name, idx in class_to_idx.items():
@@ -209,19 +294,27 @@ class EmotionPredictor:
 
     def __init__(
         self,
-        temperature: float = 1.0,
-        sad_bias: float = 0.18,
+        temperature: float = 1.1,
+        sad_bias: float = 0.0,
         equalize: bool = False,
-        prob_history_len: int = 10,
+        prob_history_len: int = 5,
+        expressive_bias: float = 0.07,
+        device: torch.device | None = None,
+        force_cpu: bool = False,
     ):
-        self.kind, self.model, self.idx_to_emotion = load_emotion_model()
+        dev = device if device is not None else pick_inference_device(force_cpu=force_cpu)
+        self.device = dev
+        self.kind, self.model, self.idx_to_emotion = load_emotion_model(dev)
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
         self.sad_idx = _class_index_for_emotion(self.idx_to_emotion, "Sad")
         self.happy_idx = _class_index_for_emotion(self.idx_to_emotion, "Happy")
         self.neutral_idx = _class_index_for_emotion(self.idx_to_emotion, "Neutral")
+        self.angry_idx = _class_index_for_emotion(self.idx_to_emotion, "Angry")
+        self.fear_idx = _class_index_for_emotion(self.idx_to_emotion, "Fear")
         self.sb = float(sad_bias)
+        self.eb = float(expressive_bias)
         self.T = max(0.05, float(temperature))
         self.equalize = equalize
         self.prob_history: deque = deque(maxlen=prob_history_len)
@@ -260,19 +353,27 @@ class EmotionPredictor:
 
         if self.kind == "torch":
             with torch.no_grad():
-                t = torch.from_numpy(inp)
+                t = torch.from_numpy(inp).to(self.device, dtype=torch.float32)
                 logits = self.model(t)
+                row = logits[0].clone()
                 if (
                     self.sad_idx is not None
                     and self.sb != 0.0
                     and _should_apply_sad_bias_torch(
-                        logits[0], self.sad_idx, self.happy_idx, self.neutral_idx
+                        row, self.sad_idx, self.happy_idx, self.neutral_idx
                     )
                 ):
-                    logits = logits.clone()
-                    logits[0, self.sad_idx] = logits[0, self.sad_idx] + self.sb
-                logits = logits / self.T
-                probs = torch.softmax(logits, dim=1)[0].numpy()
+                    row = row.clone()
+                    row[self.sad_idx] = row[self.sad_idx] + self.sb
+                row = apply_expressive_bias_torch(
+                    row,
+                    self.angry_idx,
+                    self.fear_idx,
+                    self.happy_idx,
+                    self.eb,
+                )
+                logits = row.unsqueeze(0) / self.T
+                probs = torch.softmax(logits, dim=1)[0].detach().cpu().numpy()
         else:
             raw = self.model.predict(inp, verbose=0)[0].astype(np.float64)
             raw = np.clip(raw, 1e-8, 1.0)
@@ -282,8 +383,16 @@ class EmotionPredictor:
                 if _should_apply_sad_bias_probs(
                     raw, self.sad_idx, self.happy_idx, self.neutral_idx
                 ):
-                    logp = logp.copy()
+                    logp = np.asarray(logp, dtype=np.float64).copy()
                     logp[self.sad_idx] = logp[self.sad_idx] + self.sb
+            logp = apply_expressive_bias_logp_np(
+                logp,
+                raw,
+                self.angry_idx,
+                self.fear_idx,
+                self.happy_idx,
+                self.eb,
+            )
             logp = logp / self.T
             logp -= logp.max()
             probs = np.exp(logp)
@@ -320,24 +429,57 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
+        default=1.1,
         metavar="T",
-        help="Softmax temperature (>1 spreads scores; try 1.3–1.8 if one emotion still dominates)",
+        help="Softmax temperature (>1 spreads scores; default 1.1 helps Angry/Fear vs Neutral; 1.0 sharper",
+    )
+    parser.add_argument(
+        "--smooth-frames",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Average softmax over last N frames (default 5; lower = snappier)",
+    )
+    parser.add_argument(
+        "--expressive-bias",
+        type=float,
+        default=0.07,
+        metavar="B",
+        help="Nudge Angry/Fear when a close #2 vs #1 (0=off if it over-triggers)",
     )
     parser.add_argument(
         "--sad-bias",
         type=float,
-        default=0.18,
+        default=0.0,
         metavar="B",
-        help="Sad logit boost when Sad is already top-2 (0=off; skips subtle smiles vs Neutral)",
+        help="Sad logit boost when Sad is close #2 vs #1 (default 0; try 0.08 if Sad is under-detected)",
+    )
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force PyTorch inference on CPU (ignore CUDA/MPS)",
+    )
+    parser.add_argument(
+        "--mouth-gain",
+        type=float,
+        default=0.0,
+        metavar="G",
+        help="Reserved (lip geometry disabled; keep 0)",
+    )
+    parser.add_argument(
+        "--no-mouth-geometry",
+        action="store_true",
+        help="No-op (mouth geometry removed)",
     )
     args = parser.parse_args()
 
-    kind, model, idx_to_emotion = load_emotion_model()
+    infer_device = pick_inference_device(force_cpu=args.cpu)
+    kind, model, idx_to_emotion = load_emotion_model(infer_device)
     if kind is None:
         print("No model found. Camera shows face detection only. Run: python train_model.py")
     elif kind == "torch":
         print("PyTorch emotion model loaded.")
+        print("Inference device:", infer_device)
     else:
         print("Keras emotion model loaded.")
     if kind == "torch":
@@ -346,7 +488,10 @@ def main():
     sad_idx = _class_index_for_emotion(idx_to_emotion, "Sad")
     happy_idx = _class_index_for_emotion(idx_to_emotion, "Happy")
     neutral_idx = _class_index_for_emotion(idx_to_emotion, "Neutral")
+    angry_idx = _class_index_for_emotion(idx_to_emotion, "Angry")
+    fear_idx = _class_index_for_emotion(idx_to_emotion, "Fear")
     sb = float(args.sad_bias)
+    eb = float(args.expressive_bias)
     if model is not None and sad_idx is not None and sb != 0.0:
         print(
             f"Sad bias: +{sb} when Sad is in top-2 and Happy is not a smile-like rival "
@@ -354,7 +499,11 @@ def main():
         )
     elif model is not None and sad_idx is None:
         print("Warning: Sad class not found in label map; --sad-bias has no effect.")
-
+    if model is not None and eb != 0.0:
+        print(
+            f"Expressive bias: +{eb} to Angry/Fear when runner-up is close to top-1 "
+            f"(indices {angry_idx}, {fear_idx}). --expressive-bias 0 to disable."
+        )
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
@@ -369,10 +518,10 @@ def main():
         return
 
     print("Camera on. Press Q to quit.")
-    # Average softmax vectors (matches train: no histeq by default; temporal mode of argmax biased wrong labels)
-    prob_history = deque(maxlen=10)
+    # Average softmax vectors (shorter history = Angry/Fear spikes less smoothed away)
+    prob_history = deque(maxlen=max(1, int(args.smooth_frames)))
     T = max(0.05, float(args.temperature))
-    PAD_RATIO = 0.08  # less background than before; helps webcam crops
+    PAD_RATIO = 0.08
 
     while True:
         ret, frame = cap.read()
@@ -396,19 +545,27 @@ def main():
 
                 if kind == "torch":
                     with torch.no_grad():
-                        t = torch.from_numpy(inp)
+                        t = torch.from_numpy(inp).to(
+                            infer_device, dtype=torch.float32
+                        )
                         logits = model(t)
+                        row = logits[0].clone()
                         if (
                             sad_idx is not None
                             and sb != 0.0
                             and _should_apply_sad_bias_torch(
-                                logits[0], sad_idx, happy_idx, neutral_idx
+                                row, sad_idx, happy_idx, neutral_idx
                             )
                         ):
-                            logits = logits.clone()
-                            logits[0, sad_idx] = logits[0, sad_idx] + sb
-                        logits = logits / T
-                        probs = torch.softmax(logits, dim=1)[0].numpy()
+                            row = row.clone()
+                            row[sad_idx] = row[sad_idx] + sb
+                        row = apply_expressive_bias_torch(
+                            row, angry_idx, fear_idx, happy_idx, eb
+                        )
+                        logits = row.unsqueeze(0) / T
+                        probs = (
+                            torch.softmax(logits, dim=1)[0].detach().cpu().numpy()
+                        )
                 else:
                     raw = model.predict(inp, verbose=0)[0].astype(np.float64)
                     raw = np.clip(raw, 1e-8, 1.0)
@@ -418,8 +575,11 @@ def main():
                         if _should_apply_sad_bias_probs(
                             raw, sad_idx, happy_idx, neutral_idx
                         ):
-                            logp = logp.copy()
+                            logp = np.asarray(logp, dtype=np.float64).copy()
                             logp[sad_idx] = logp[sad_idx] + sb
+                    logp = apply_expressive_bias_logp_np(
+                        logp, raw, angry_idx, fear_idx, happy_idx, eb
+                    )
                     logp = logp / T
                     logp -= logp.max()
                     probs = np.exp(logp)

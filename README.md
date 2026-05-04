@@ -98,7 +98,24 @@ python emotion_detection.py
 
 If the camera does not open, grant camera access in **System Settings → Privacy & Security → Camera** for Terminal or VS Code.
 
-## 5. Quick reference
+## 5. Web robot (browser + reacting robot)
+
+There is a **local web UI** that uses the same emotion pipeline as `emotion_detection.py`: your webcam runs in the page, frames are sent to a small **FastAPI** server, and an **SVG robot** on screen changes pose by emotion (happy → leans in / waves, sad → backs away + cheer overlay, neutral → dance, angry / fear / surprise / disgust → their own animations).
+
+**Run the server** (keep this terminal open):
+
+```bash
+source .venv/bin/activate
+python robot_web.py
+```
+
+**Open in your browser:** [http://127.0.0.1:8765](http://127.0.0.1:8765) (Chrome is fine.)
+
+Click **Start camera**, allow webcam access. The page posts JPEG frames to `/api/predict` about **5 times per second**.
+
+Files: `robot_web.py`, `static/index.html`.
+
+## 6. Quick reference
 
 | Step              | Command                |
 |-------------------|------------------------|
@@ -106,9 +123,10 @@ If the camera does not open, grant camera access in **System Settings → Privac
 | Install deps      | `pip install -r requirements.txt` |
 | Train model       | `python train_model.py` |
 | Run webcam        | `python emotion_detection.py` |
+| Web robot         | `python robot_web.py` then open http://127.0.0.1:8765 |
 | Quit webcam       | Press **Q**            |
 
-## Dependencies (in requirements.txt)
+## 7. Dependencies (in requirements.txt)
 
 - **opencv-python** – webcam and face detection  
 - **numpy**, **pandas** – data handling  
